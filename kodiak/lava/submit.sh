@@ -97,7 +97,7 @@ echo "   stored at $GET_URL"
 #   FLASH_LAVA_CONNECT=1 forces interactive, =0 forces flash-only; unset prompts
 #   (default Yes). A non-tty (CI, piped) defaults to flash-only — a console needs
 #   a terminal to attach to.
-CONNECT_SH="$(dirname "$0")/connect.sh"
+CONNECT_SH="$(dirname "$0")/../../qcom/lava/connect.sh"
 interactive=""
 case "${FLASH_LAVA_CONNECT:-}" in
   1) interactive="yes" ;;
@@ -118,8 +118,11 @@ esac
 if [ -n "$interactive" ]; then
   [ -x "$CONNECT_SH" ] || { echo "ERROR: $CONNECT_SH not found/executable" >&2; exit 1; }
   echo ">> opening an interactive session (single flash + console) via connect.sh ..."
+  # connect.sh is board-agnostic, so tell it which device-type to reserve. Take it
+  # from this job's YAML unless the caller already set FLASH_LAVA_DEVICE_TYPE.
+  DEVICE_TYPE="${FLASH_LAVA_DEVICE_TYPE:-$(grep -E '^device_type:' "$JOB_YAML" | head -1 | sed -E 's/^device_type:[[:space:]]*//')}"
   # Reuse the already-uploaded artifact so connect.sh need not re-upload.
-  exec "$CONNECT_SH" "$TARBALL" "$JOB_YAML" "$GET_URL" "$UP_TOK"
+  exec env FLASH_LAVA_DEVICE_TYPE="$DEVICE_TYPE" "$CONNECT_SH" "$TARBALL" "$JOB_YAML" "$GET_URL" "$UP_TOK"
 fi
 
 # --- flash-only: fill the YAML and submit --------------------------------------

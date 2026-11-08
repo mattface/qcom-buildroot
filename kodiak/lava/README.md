@@ -228,7 +228,7 @@ Flash interactively and open the console? [Y/n]
 
 Either path flashes the board **exactly once**.
 
-- **Enter / Y → interactive** — `kodiak/lava/connect.sh` reserves a board and
+- **Enter / Y → interactive** — `qcom/lava/connect.sh` reserves a board and
   flashes it, then drops you on its serial console (see below).
 - **n → flash-only** — submits a throwaway qdl deploy+boot job over the LAVA REST
   API and polls it to `health: Complete` (which means it flashed *and* booted to
@@ -289,7 +289,8 @@ rootfs may present a different login prompt and creds — adjust `auto_login` /
 `device_type: qcs6490-rb3gen2` in both YAMLs targets the RB3 Gen2 in the lab.
 Confirm the exact device-type string in your LAVA instance with the MCP
 `list_devices` (or the web UI). If it differs, update the `device_type:` line in
-each YAML and pass `FLASH_LAVA_DEVICE_TYPE=<name>` to `connect.sh`.
+each YAML — `submit.sh` reads it from there and passes it to `connect.sh`
+(override with `FLASH_LAVA_DEVICE_TYPE=<name>` if needed).
 
 ## Running the full test suite (flash-lava-test)
 

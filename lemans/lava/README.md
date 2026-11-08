@@ -226,7 +226,7 @@ Flash interactively and open the console? [Y/n]
 
 Either path flashes the board **exactly once**.
 
-- **Enter / Y → interactive** — `lemans/lava/connect.sh` reserves a board and
+- **Enter / Y → interactive** — `qcom/lava/connect.sh` reserves a board and
   flashes it, then drops you on its serial console (see below).
 - **n → flash-only** — submits a throwaway qdl deploy+boot job over the LAVA REST
   API and polls it to `health: Complete` (which means it flashed *and* booted to

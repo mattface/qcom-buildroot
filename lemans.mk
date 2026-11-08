@@ -1087,7 +1087,7 @@ FLASH_LAVA_YOCTO_JOB ?= $(CURDIR)/lemans/lava/flash-lava-yocto.yaml
 # uploads it (minting a lab-reachable URL via the LAVA MCP through headless
 # `claude`) and then flashes a lab board. On a terminal it asks how to flash
 # (default Y): interactively — reserve a board, flash it once from inside the
-# session container, and open its serial console (lemans/lava/connect.sh) — or
+# session container, and open its serial console (qcom/lava/connect.sh) — or
 # answer n for a one-shot flash-only job submitted over the REST API and polled
 # to completion. FLASH_LAVA_CONNECT=1 forces interactive, =0 forces flash-only
 # (also the default for non-tty/CI). To only build the tarball without touching

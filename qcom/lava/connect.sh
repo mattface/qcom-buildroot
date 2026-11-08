@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kodiak/lava/connect.sh — open an interactive LAVA board session, flash the
+# qcom/lava/connect.sh — open an interactive LAVA board session, flash the
 # board from inside the device-attached container, and drop you on its serial
 # console. The interactive counterpart to submit.sh.
 #
@@ -12,7 +12,7 @@
 # flash tarball into that container, qdl it onto the board over USB, then attach
 # to the board's UART. The board is held until you exit (then auto-released).
 #
-#   1. open_board_session(qcs6490-rb3gen2, console=true, downloads=[tarball]) —
+#   1. open_board_session(<device-type>, console=true, downloads=[tarball]) —
 #      reserve a board + container, pre-stage the tarball at /lava-downloads.
 #   2. run_device_command qdl_enter — force the board into EDL (qdl mode).
 #   3. run_in_session "tar -xzf … && qdl …" — flash over USB from the container.
@@ -42,8 +42,10 @@ UP_TOK="${4:-}"
 LAVA_URL="${LAVA_URL:-https://lava.infra.foundries.io}"
 MCP_URL="${LAVA_MCP_URL:-$LAVA_URL/mcp}"
 CLAUDE_JSON="${CLAUDE_JSON:-$HOME/.claude.json}"
-DEVICE_TYPE="${FLASH_LAVA_DEVICE_TYPE:-qcs6490-rb3gen2}"
-# A full Yocto flash (large rootfs) runs well past run_in_session's 120s
+# The board's LAVA device-type. submit.sh sets this from the job YAML; run by hand,
+# export FLASH_LAVA_DEVICE_TYPE=<name> yourself (this script is board-agnostic).
+DEVICE_TYPE="${FLASH_LAVA_DEVICE_TYPE:?set FLASH_LAVA_DEVICE_TYPE to the board LAVA device-type}"
+# A full Yocto flash (~924 MB rootfs) runs well past run_in_session's 120s
 # default; give the in-container qdl room.
 FLASH_TIMEOUT="${FLASH_LAVA_FLASH_TIMEOUT:-1200}"
 CONNECT_MAX="${FLASH_LAVA_CONNECT_MAX:-24}"   # 24 * 10s = 4 min for the session to connect
@@ -149,19 +151,13 @@ if [ -z "$GET_URL" ] || [ -z "$UP_TOK" ]; then
   echo "   stored at $GET_URL"
 fi
 
-# --- tool bootstrap: websocat (required) + socat (nice-to-have) -----------------
+# --- tool bootstrap -------------------------------------------------------------
+# The gateway tunnel needs a WebSocket ProxyCommand. Newer MCP servers return a
+# self-contained `connect_script` (python3 + the `websockets` package, generated on the
+# fly with the key embedded); older ones return an `ssh -W` command that shells out to
+# the `websocat` binary. We resolve which — and fetch only what that server needs — at
+# attach time (step 4). socat (raw tty) is handled there too.
 export PATH="$HOME/.local/bin:$PATH"
-if ! command -v websocat >/dev/null; then
-  echo ">> websocat not found — fetching the static binary to ~/.local/bin ..."
-  mkdir -p "$HOME/.local/bin"
-  WURL=""
-  command -v gh >/dev/null && WURL="$(gh api repos/vi/websocat/releases/latest \
-    --jq '.assets[] | select(.name|test("x86_64-unknown-linux-musl$")) | .browser_download_url' 2>/dev/null | head -1)"
-  [ -n "$WURL" ] || WURL="https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-unknown-linux-musl"
-  curl -fsSL "$WURL" -o "$HOME/.local/bin/websocat" && chmod +x "$HOME/.local/bin/websocat" \
-    || { echo "ERROR: could not install websocat (needed for the SSH gateway tunnel). Install it manually." >&2; exit 1; }
-  echo "   installed $(websocat --version 2>/dev/null || echo websocat)"
-fi
 
 # --- 1. open the board session (container + console) with the tarball staged ----
 echo ">> [1/4] opening an interactive $DEVICE_TYPE session (console + staged tarball) ..."
@@ -228,8 +224,8 @@ fi
 echo "   connected."
 
 # --- 2. force EDL so the board enumerates as qdl --------------------------------
-# The board enters EDL via its `qdl_enter` user command (runs tac-api
-# bootToEDL); there is no generic recovery_mode on this device. Override with
+# The board enters EDL via its `qdl_enter` user command (runs tac-api bootToEDL);
+# there is no generic recovery_mode on these devices. Override with
 # FLASH_LAVA_EDL_CMD if a given board names it differently.
 EDL_CMD="${FLASH_LAVA_EDL_CMD:-qdl_enter}"
 echo ">> [2/4] forcing the board into EDL ($EDL_CMD) ..."
@@ -285,19 +281,78 @@ echo "   flash complete."
 [ -n "$CONSOLE_ID" ] || { echo "ERROR: no console session was opened; cannot attach to the UART" >&2; exit 1; }
 echo ">> [4/4] attaching to the board console ($CONSOLE_ID) ..."
 AC="$(mcp attach_console "$(jq -nc --arg s "$CONSOLE_ID" '{session_id:$s}')")"
-SSH_W="$(jq_field "$AC" '.ssh_W_command')"
-[ -n "$SSH_W" ] && [ "$SSH_W" != null ] || { echo "ERROR: attach_console returned no ssh command: $AC" >&2; exit 1; }
-KEY="$TMP/console.key"
-jq_field "$AC" '.private_key' > "$KEY"; chmod 600 "$KEY"
-# attach_console returns a command string referencing its own key filename; point
-# it at the key we just wrote.
-SSH_W_LOCAL="$(printf '%s' "$SSH_W" | sed -E "s#-i [^ ]+\.key#-i $KEY#")"
-# socat's EXEC splits the command on whitespace itself and does NOT honour the
-# shell quoting around the `'ProxyCommand=websocat …'` arg, so handing it the raw
-# ssh string fails with "wrong number of parameters". Wrap the command in a tiny
-# script and EXEC that single path instead — the script's shell parses the quotes.
+# How we reach the UART depends on the MCP server version. Newer servers (>= 1.0a2)
+# hand back a ready-to-run connect_script: a small Python program with the key and the
+# WebSocket relay built in. Older servers hand back an `ssh -W` command whose
+# ProxyCommand is websocat. Either way we end up with CONSOLE_RUN, a little script that
+# opens the console on its stdin/stdout, which socat wraps into a raw tty further down.
 CONSOLE_RUN="$TMP/console-run.sh"
-printf '#!/usr/bin/env bash\nexec %s\n' "$SSH_W_LOCAL" > "$CONSOLE_RUN"
+CONNECT_PY="$(jq_field "$AC" '.connect_script // empty')"
+
+if [ -n "$CONNECT_PY" ] && [ "$CONNECT_PY" != null ]; then
+  echo "   using the server's connect_script (python3 + websockets)"
+
+  # The script needs only python3 and the websockets package.
+  if ! python3 -c 'import websockets' 2>/dev/null; then
+    echo "   installing the python 'websockets' package ..."
+    if ! python3 -m pip install --user --quiet websockets; then
+      echo "ERROR: the connect_script needs python3 'websockets'." >&2
+      echo "       Install it with:  apt install python3-websockets" >&2
+      echo "                   (or:  pip install websockets)" >&2
+      exit 1
+    fi
+  fi
+
+  printf '%s' "$CONNECT_PY" > "$TMP/console.py"
+  cat > "$CONSOLE_RUN" <<EOF
+#!/usr/bin/env bash
+exec python3 "$TMP/console.py"
+EOF
+
+else
+  echo "   using ssh -W with a websocat ProxyCommand (older MCP server)"
+
+  SSH_W="$(jq_field "$AC" '.ssh_W_command')"
+  if [ -z "$SSH_W" ] || [ "$SSH_W" = null ]; then
+    echo "ERROR: attach_console returned no connect_script and no ssh_W_command:" >&2
+    echo "$AC" >&2
+    exit 1
+  fi
+
+  # Fetch the static websocat binary into ~/.local/bin if the host does not have it.
+  if ! command -v websocat >/dev/null; then
+    echo "   websocat not found — fetching the static binary to ~/.local/bin ..."
+    mkdir -p "$HOME/.local/bin"
+    WURL=""
+    if command -v gh >/dev/null; then
+      WURL="$(gh api repos/vi/websocat/releases/latest \
+        --jq '.assets[] | select(.name|test("x86_64-unknown-linux-musl$")) | .browser_download_url' \
+        2>/dev/null | head -1)"
+    fi
+    if [ -z "$WURL" ]; then
+      WURL="https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-unknown-linux-musl"
+    fi
+    if ! curl -fsSL "$WURL" -o "$HOME/.local/bin/websocat"; then
+      echo "ERROR: could not download websocat (needed for the SSH gateway tunnel)." >&2
+      exit 1
+    fi
+    chmod +x "$HOME/.local/bin/websocat"
+  fi
+
+  # Save the key the server minted and point its ssh command at our copy of it.
+  KEY="$TMP/console.key"
+  jq_field "$AC" '.private_key' > "$KEY"
+  chmod 600 "$KEY"
+  SSH_W_LOCAL="$(printf '%s' "$SSH_W" | sed -E "s#-i [^ ]+\.key#-i $KEY#")"
+
+  # socat's EXEC splits on whitespace and drops the quoting around the ProxyCommand
+  # argument, so wrap the whole ssh command in a script and let socat exec that.
+  cat > "$CONSOLE_RUN" <<EOF
+#!/usr/bin/env bash
+exec $SSH_W_LOCAL
+EOF
+fi
+
 chmod +x "$CONSOLE_RUN"
 
 echo ""
